@@ -21,7 +21,6 @@ from typing import List, Dict, Optional, Tuple
 import wandb  # Import wandb for experiment tracking
 from esm.utils.constants.models import ESMC_600M, ESMC_300M
 from esm.pretrained import load_local_model
-from esm.models.esmc import ESMC
 from esm.interpretability.esmc_interpreter import ESMCInterpreter
 
 # Set up logging
