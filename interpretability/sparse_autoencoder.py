@@ -16,6 +16,7 @@ class SparseAutoencoder(nn.Module):
         use_top_k (bool): Whether to use top-k sparsity in the encoder
         top_k_percentage (float): Percentage of features to keep active (between 0 and 1)
         dtype (torch.dtype): Data type for parameters
+        data_for_init (torch.Tensor, optional): Data to compute geometric median for bias initialization
     """
     def __init__(
         self, 
@@ -25,6 +26,7 @@ class SparseAutoencoder(nn.Module):
         use_top_k: bool = False,
         top_k_percentage: float = 0.1,
         dtype: torch.dtype = torch.float32,
+        data_for_init: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         
@@ -36,17 +38,31 @@ class SparseAutoencoder(nn.Module):
         
         # Encoder and decoder
         self.encoder = nn.Linear(input_dim, hidden_dim, bias=True, dtype=dtype)
-        self.decoder = nn.Linear(hidden_dim, input_dim, bias=True, dtype=dtype)
+        self.decoder = nn.Linear(hidden_dim, input_dim, bias=False, dtype=dtype)
+        
+        # Learned centering bias (shared between encoder and decoder)
+        # We will constrain pre-encoder bias = -post-decoder bias
+        self.centering_bias = nn.Parameter(torch.zeros(input_dim, dtype=dtype))
         
         # Initialize weights
-        self._init_weights()
+        self._init_weights(data_for_init)
         
-    def _init_weights(self):
+    def _init_weights(self, data_for_init=None):
         """Initialize weights with small random values."""
         nn.init.kaiming_normal_(self.encoder.weight, nonlinearity='relu')
         nn.init.zeros_(self.encoder.bias)
         nn.init.kaiming_normal_(self.decoder.weight, nonlinearity='linear')
-        nn.init.zeros_(self.decoder.bias)
+        
+        # Initialize centering bias to geometric median of dataset if provided
+        if data_for_init is not None:
+            self.centering_bias.data = self._compute_geometric_median(data_for_init)
+    
+    def _compute_geometric_median(self, data: torch.Tensor) -> torch.Tensor:
+        """Compute the geometric median of the dataset for bias initialization."""
+        # Simple approximation: use median of each dimension
+        # For a more accurate geometric median, a more complex algorithm would be needed
+        with torch.no_grad():
+            return torch.median(data, dim=0)[0]
     
     def _apply_top_k(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -78,15 +94,21 @@ class SparseAutoencoder(nn.Module):
         Returns:
             Tuple of (reconstructed_input, sparse_code)
         """
+        # Apply centering bias to input (pre-encoder bias)
+        centered_x = x - self.centering_bias
+        
         # Encode to get sparse features
-        sparse_code = F.relu(self.encoder(x))
+        sparse_code = F.relu(self.encoder(centered_x))
         
         # Apply top-k sparsity if enabled
         if self.use_top_k:
             sparse_code = self._apply_top_k(sparse_code)
         
         # Decode to reconstruct input
-        reconstructed = self.decoder(sparse_code)
+        decoded = self.decoder(sparse_code)
+        
+        # Add centering bias to output (post-decoder bias)
+        reconstructed = decoded + self.centering_bias
         
         return reconstructed, sparse_code
     

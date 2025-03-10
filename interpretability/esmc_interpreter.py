@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional, Tuple, Union, Callable
+from typing import Dict, List, Optional, Tuple, Union, Callable, Any
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
@@ -10,6 +10,8 @@ from collections import defaultdict
 import esm as esm
 from interpretability.sparse_autoencoder import SparseAutoencoder
 from interpretability.activation_hooks import ESMCActivationCapturer
+from torch.utils.data import DataLoader, TensorDataset
+from esm.model.esmc import ESMC
 
 
 class ESMCInterpreter:
@@ -53,13 +55,14 @@ class ESMCInterpreter:
         # Determine data type from model
         self.dtype = next(model.parameters()).dtype
         
-    def create_autoencoder_for_layer(self, layer_idx: int, component: str = 'mlp') -> SparseAutoencoder:
+    def create_autoencoder_for_layer(self, layer_idx: int, component: str = 'mlp', data_for_init: Optional[torch.Tensor] = None) -> SparseAutoencoder:
         """
         Create a sparse autoencoder for a specific layer.
         
         Args:
             layer_idx: Index of the transformer layer
             component: Which component to analyze ('attention', 'mlp', 'embeddings')
+            data_for_init: Optional sample of activations to initialize the bias term
             
         Returns:
             SparseAutoencoder instance
@@ -83,7 +86,8 @@ class ESMCInterpreter:
             l1_coefficient=self.l1_coefficient,
             use_top_k=self.use_top_k,
             top_k_percentage=self.top_k_percentage,
-            dtype=self.dtype
+            dtype=self.dtype,
+            data_for_init=data_for_init
         ).to(self.device)
         
         self.autoencoders[key] = autoencoder
@@ -211,7 +215,10 @@ class ESMCInterpreter:
         
         # Create autoencoder if it doesn't exist
         if key not in self.autoencoders:
-            self.create_autoencoder_for_layer(layer_idx, component)
+            # Take a sample of activations to initialize the centering bias
+            sample_size = min(1000, activations.shape[0])  # Limit sample size
+            activation_sample = activations[:sample_size]
+            self.create_autoencoder_for_layer(layer_idx, component, data_for_init=activation_sample)
         
         autoencoder = self.autoencoders[key]
         optimizer = torch.optim.AdamW(autoencoder.parameters(), lr=lr)
