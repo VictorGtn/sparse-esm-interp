@@ -11,7 +11,6 @@ import esm as esm
 from interpretability.sparse_autoencoder import SparseAutoencoder
 from interpretability.activation_hooks import ESMCActivationCapturer
 from torch.utils.data import DataLoader, TensorDataset
-from esm.model.esmc import ESMC
 
 
 class ESMCInterpreter:
@@ -28,7 +27,7 @@ class ESMCInterpreter:
     """
     def __init__(
         self, 
-        model: ESMC,
+        model,
         hidden_dim: Optional[int] = None,
         device: Optional[torch.device] = None,
         l1_coefficient: float = 1e-3,
@@ -288,13 +287,11 @@ class ESMCInterpreter:
                     global_step in resample_steps and 
                     autoencoder.steps_since_update >= 12500):
                     
-                    logger.info(f"Step {global_step}: Checking for dead neurons...")
                     resample_loss, n_resampled = autoencoder.resample_dead_neurons(
                         resampling_activations, optimizer
                     )
                     
                     if n_resampled > 0:
-                        logger.info(f"Resampled {n_resampled} dead neurons at step {global_step}")
                         
                         if use_wandb:
                             wandb.log({
