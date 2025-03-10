@@ -69,6 +69,13 @@ def parse_args():
                         help="Batch size for training")
     parser.add_argument("--learning-rate", type=float, default=1e-3,
                         help="Learning rate")
+    
+    # Dead neuron resampling arguments
+    parser.add_argument("--resample-dead-neurons", action="store_true",
+                        help="Enable dead neuron resampling during training")
+    parser.add_argument("--resample-steps", type=str, default="25000,50000,75000,100000",
+                        help="Comma-separated list of steps at which to check and resample dead neurons")
+    
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
@@ -211,7 +218,15 @@ def main():
         save_dir.mkdir(exist_ok=True)
         save_path = save_dir / "autoencoder.pt"
         
-        # Train autoencoder with wandb logging if enabled
+        # Train autoencoder
+        logger.info(f"Training autoencoder for {layer_key}")
+        
+        # Parse resample steps from string to list of integers
+        resample_steps = None
+        if args.resample_dead_neurons:
+            resample_steps = [int(step) for step in args.resample_steps.split(',')]
+            logger.info(f"Will resample dead neurons at steps: {resample_steps}")
+        
         metrics = interpreter.train_layer_autoencoder(
             layer_idx=layer_idx,
             activations=layer_acts,
@@ -221,7 +236,9 @@ def main():
             lr=args.learning_rate,
             save_path=save_path,
             use_wandb=args.use_wandb,
-            wandb_prefix=f"layer_{layer_idx}/{args.component}"
+            wandb_prefix=f"layer_{layer_idx}/{args.component}",
+            resample_dead_neurons=args.resample_dead_neurons,
+            resample_steps=resample_steps,
         )
         
         # Save training metrics

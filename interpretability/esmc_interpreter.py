@@ -192,7 +192,9 @@ class ESMCInterpreter:
         lr: float = 1e-3,
         save_path: Optional[str] = None,
         use_wandb: bool = False,
-        wandb_prefix: str = ""
+        wandb_prefix: str = "",
+        resample_dead_neurons: bool = True,
+        resample_steps: List[int] = [25000, 50000, 75000, 100000],
     ) -> Dict[str, List[float]]:
         """
         Train an autoencoder for a specific layer.
@@ -207,6 +209,8 @@ class ESMCInterpreter:
             save_path: Path to save the trained autoencoder
             use_wandb: Whether to log metrics to Weights & Biases
             wandb_prefix: Prefix for wandb metric names
+            resample_dead_neurons: Whether to resample dead neurons during training
+            resample_steps: Steps at which to resample dead neurons
             
         Returns:
             Dictionary of training metrics
@@ -223,12 +227,9 @@ class ESMCInterpreter:
         autoencoder = self.autoencoders[key]
         optimizer = torch.optim.AdamW(autoencoder.parameters(), lr=lr)
         
-        # Training loop
-        metrics = defaultdict(list)
-        dataset = torch.utils.data.TensorDataset(activations)
-        dataloader = torch.utils.data.DataLoader(
-            dataset, batch_size=batch_size, shuffle=True
-        )
+        # Create dataset and dataloader
+        dataset = TensorDataset(activations)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
         # Import wandb only if needed (to avoid dependency requirement when not using it)
         if use_wandb:
@@ -242,6 +243,16 @@ class ESMCInterpreter:
         if wandb_prefix and not wandb_prefix.endswith('/'):
             wandb_prefix = wandb_prefix + '/'
         
+        # Save a subset of activations for dead neuron resampling
+        if resample_dead_neurons:
+            resampling_size = min(819200, len(activations))  # As specified in the description
+            resampling_indices = torch.randperm(len(activations))[:resampling_size]
+            resampling_activations = activations[resampling_indices].to(self.device)
+        
+        # Training loop
+        metrics = defaultdict(list)
+        global_step = 0  # Track total training steps
+        
         for epoch in range(epochs):
             epoch_metrics = defaultdict(float)
             n_batches = 0
@@ -251,6 +262,9 @@ class ESMCInterpreter:
                 
                 # Forward pass
                 reconstructed, sparse_code = autoencoder(x)
+                
+                # Track neuron activity for dead neuron detection
+                autoencoder.track_neuron_activity(sparse_code)
                 
                 # Compute loss
                 loss_dict = autoencoder.loss(x, reconstructed, sparse_code)
@@ -265,6 +279,29 @@ class ESMCInterpreter:
                 for k, v in loss_dict.items():
                     epoch_metrics[k] += v.item() if torch.is_tensor(v) else v
                 n_batches += 1
+                
+                # Increment global step
+                global_step += 1
+                
+                # Resample dead neurons at specified steps
+                if (resample_dead_neurons and 
+                    global_step in resample_steps and 
+                    autoencoder.steps_since_update >= 12500):
+                    
+                    logger.info(f"Step {global_step}: Checking for dead neurons...")
+                    resample_loss, n_resampled = autoencoder.resample_dead_neurons(
+                        resampling_activations, optimizer
+                    )
+                    
+                    if n_resampled > 0:
+                        logger.info(f"Resampled {n_resampled} dead neurons at step {global_step}")
+                        
+                        if use_wandb:
+                            wandb.log({
+                                f"{wandb_prefix}resampled_neurons": n_resampled,
+                                f"{wandb_prefix}resampling_loss": resample_loss.item(),
+                                f"{wandb_prefix}step": global_step
+                            })
             
             # Compute epoch averages
             for k, v in epoch_metrics.items():
@@ -276,6 +313,7 @@ class ESMCInterpreter:
                 wandb_metrics = {f"{wandb_prefix}{k}": v for k, v in metrics.items()}
                 # Add epoch information to metrics
                 wandb_metrics[f"{wandb_prefix}epoch"] = epoch
+                wandb_metrics[f"{wandb_prefix}step"] = global_step
                 wandb.log(wandb_metrics)
             
             print(f"Epoch {epoch+1}: recon_loss={metrics['reconstruction'][-1]:.4f}, "

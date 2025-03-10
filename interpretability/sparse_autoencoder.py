@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
+from collections import deque
 
 
 class SparseAutoencoder(nn.Module):
@@ -46,6 +47,10 @@ class SparseAutoencoder(nn.Module):
         
         # Initialize weights
         self._init_weights(data_for_init)
+        
+        # Neuron activity tracking for dead neuron detection
+        self.neuron_activity_history = deque(maxlen=12500)  # Track last 12,500 batch activations
+        self.steps_since_update = 0
         
     def _init_weights(self, data_for_init=None):
         """Initialize weights with small random values."""
@@ -111,6 +116,124 @@ class SparseAutoencoder(nn.Module):
         reconstructed = decoded + self.centering_bias
         
         return reconstructed, sparse_code
+    
+    def track_neuron_activity(self, sparse_code: torch.Tensor):
+        """
+        Track which neurons are active in the current batch.
+        
+        Args:
+            sparse_code: Tensor of shape [batch_size, hidden_dim] with sparse activations
+        """
+        # For each neuron, check if it fired for any example in the batch
+        active_neurons = (sparse_code > 0).any(dim=0).cpu()  # Shape: [hidden_dim]
+        self.neuron_activity_history.append(active_neurons)
+        self.steps_since_update += 1
+        
+    def identify_dead_neurons(self) -> torch.Tensor:
+        """
+        Identify neurons that haven't fired in the tracked history.
+        
+        Returns:
+            Boolean tensor with True for dead neurons [hidden_dim]
+        """
+        if not self.neuron_activity_history:
+            return torch.zeros(self.hidden_dim, dtype=torch.bool)
+            
+        # Combine all activation records
+        activity_tensor = torch.stack(list(self.neuron_activity_history), dim=0)  # [history_len, hidden_dim]
+        
+        # A neuron is dead if it never fired for any input in the history
+        dead_neurons = ~activity_tensor.any(dim=0)  # [hidden_dim]
+        
+        return dead_neurons
+        
+    def resample_dead_neurons(
+        self, 
+        inputs: torch.Tensor, 
+        optimizer: torch.optim.Optimizer
+    ) -> Tuple[torch.Tensor, int]:
+        """
+        Resample dead neurons based on inputs with high reconstruction loss.
+        
+        Args:
+            inputs: Tensor of input samples [n_samples, input_dim]
+            optimizer: The optimizer being used for training (to reset parameters)
+            
+        Returns:
+            Tuple of (loss_values, number_of_resampled_neurons)
+        """
+        # Identify dead neurons
+        dead_neurons = self.identify_dead_neurons()
+        dead_neuron_indices = torch.where(dead_neurons)[0]
+        n_dead = len(dead_neuron_indices)
+        
+        if n_dead == 0:
+            return torch.tensor(0.0, device=inputs.device), 0
+            
+        # Calculate loss for each input to find high-loss samples
+        with torch.no_grad():
+            batch_size = 128  # Process in batches to avoid OOM
+            losses = []
+            
+            for i in range(0, inputs.size(0), batch_size):
+                batch = inputs[i:i+batch_size]
+                reconstructed, _ = self.forward(batch)
+                batch_loss = F.mse_loss(reconstructed, batch, reduction='none').sum(dim=1)  # [batch_size]
+                losses.append(batch_loss)
+                
+            all_losses = torch.cat(losses, dim=0)  # [n_samples]
+            
+            # Square the losses to increase weight of high-loss samples
+            sampling_weights = all_losses ** 2
+            sampling_probs = sampling_weights / sampling_weights.sum()
+            
+        # Sample inputs based on their loss
+        indices = torch.multinomial(sampling_probs, num_samples=n_dead, replacement=True)
+        sampled_inputs = inputs[indices]  # [n_dead, input_dim]
+        
+        # Compute average norm of alive encoder weights
+        alive_norms = torch.norm(self.encoder.weight[~dead_neurons], dim=1)
+        avg_alive_norm = alive_norms.mean() if alive_norms.numel() > 0 else torch.tensor(1.0, device=inputs.device)
+        
+        
+        with torch.no_grad():
+            for i, neuron_idx in enumerate(dead_neuron_indices):
+                # Normalize the input and set as decoder weights
+                input_vec = sampled_inputs[i] - self.centering_bias  # Apply centering bias 
+                normalized_input = F.normalize(input_vec, dim=0) * avg_alive_norm * 0.2
+                
+                # Set encoder weights directly from the normalized input
+                self.encoder.weight[neuron_idx] = normalized_input
+                self.encoder.bias[neuron_idx] = 0.0
+                
+                # Set decoder weights (transposed relationship)
+                self.decoder.weight[:, neuron_idx] = F.normalize(input_vec, dim=0)
+                
+                # Reset optimizer state for this neuron's parameters
+                param_id_encoder_w = id(self.encoder.weight)
+                param_id_encoder_b = id(self.encoder.bias)
+                param_id_decoder_w = id(self.decoder.weight)
+                
+                if param_id_encoder_w in optimizer.state:
+                    for key in optimizer.state[param_id_encoder_w]:
+                        if hasattr(optimizer.state[param_id_encoder_w][key], 'index_select'):
+                            optimizer.state[param_id_encoder_w][key][neuron_idx] = 0
+                
+                if param_id_encoder_b in optimizer.state:
+                    for key in optimizer.state[param_id_encoder_b]:
+                        if hasattr(optimizer.state[param_id_encoder_b][key], 'index_select'):
+                            optimizer.state[param_id_encoder_b][key][neuron_idx] = 0
+                            
+                if param_id_decoder_w in optimizer.state:
+                    for key in optimizer.state[param_id_decoder_w]:
+                        if hasattr(optimizer.state[param_id_decoder_w][key], 'index_select'):
+                            optimizer.state[param_id_decoder_w][key][:, neuron_idx] = 0
+        
+        # Reset activity tracking after resampling
+        self.neuron_activity_history.clear()
+        self.steps_since_update = 0
+        
+        return all_losses[indices].mean(), n_dead
     
     def loss(
         self, 
