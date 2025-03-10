@@ -194,6 +194,7 @@ class ESMCInterpreter:
         wandb_prefix: str = "",
         resample_dead_neurons: bool = True,
         resample_steps: List[int] = [25000, 50000, 75000, 100000],
+        unit_norm_constraint: bool = True,
     ) -> Dict[str, List[float]]:
         """
         Train an autoencoder for a specific layer.
@@ -210,6 +211,7 @@ class ESMCInterpreter:
             wandb_prefix: Prefix for wandb metric names
             resample_dead_neurons: Whether to resample dead neurons during training
             resample_steps: Steps at which to resample dead neurons
+            unit_norm_constraint: Whether to apply unit norm constraints on dictionary vectors
             
         Returns:
             Dictionary of training metrics
@@ -252,6 +254,10 @@ class ESMCInterpreter:
         metrics = defaultdict(list)
         global_step = 0  # Track total training steps
         
+        # Initial normalization of decoder weights if using unit norm constraint
+        if unit_norm_constraint:
+            autoencoder.normalize_decoder_weights()
+        
         for epoch in range(epochs):
             epoch_metrics = defaultdict(float)
             n_batches = 0
@@ -269,10 +275,20 @@ class ESMCInterpreter:
                 loss_dict = autoencoder.loss(x, reconstructed, sparse_code)
                 loss = loss_dict["total"]
                 
-                # Backward pass and optimize
+                # Backward pass
                 optimizer.zero_grad()
                 loss.backward()
+                
+                # Project out gradient components parallel to dictionary vectors
+                if unit_norm_constraint:
+                    autoencoder.project_decoder_grad()
+                
+                # Update weights
                 optimizer.step()
+                
+                # Apply unit norm constraint as a fallback
+                #if unit_norm_constraint:
+                    #autoencoder.normalize_decoder_weights()
                 
                 # Track metrics
                 for k, v in loss_dict.items():

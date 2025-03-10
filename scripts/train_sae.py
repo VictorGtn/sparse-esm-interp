@@ -56,6 +56,8 @@ def parse_args():
                         help="Use top-k sparsity instead of L1")
     parser.add_argument("--top-k-percentage", type=float, default=0.1, 
                         help="Percentage of features to keep active in top-k sparsity")
+    parser.add_argument("--unit-norm-constraint", action="store_true", default=True,
+                        help="Apply unit norm constraint to dictionary vectors with gradient projection")
     
     # Training arguments
     parser.add_argument("--layers", type=str, default="5,10,15",
@@ -227,6 +229,10 @@ def main():
             resample_steps = [int(step) for step in args.resample_steps.split(',')]
             logger.info(f"Will resample dead neurons at steps: {resample_steps}")
         
+        # Log unit norm constraint approach
+        if args.unit_norm_constraint:
+            logger.info("Using improved unit norm constraint with gradient projection")
+        
         metrics = interpreter.train_layer_autoencoder(
             layer_idx=layer_idx,
             activations=layer_acts,
@@ -239,6 +245,7 @@ def main():
             wandb_prefix=f"layer_{layer_idx}/{args.component}",
             resample_dead_neurons=args.resample_dead_neurons,
             resample_steps=resample_steps,
+            unit_norm_constraint=args.unit_norm_constraint,
         )
         
         # Save training metrics

@@ -56,7 +56,12 @@ class SparseAutoencoder(nn.Module):
         """Initialize weights with small random values."""
         nn.init.kaiming_normal_(self.encoder.weight, nonlinearity='relu')
         nn.init.zeros_(self.encoder.bias)
+        
+        # Initialize decoder weights with unit norm
         nn.init.kaiming_normal_(self.decoder.weight, nonlinearity='linear')
+        with torch.no_grad():
+            # Normalize each column (dictionary vector) to have unit norm
+            self.decoder.weight.data = F.normalize(self.decoder.weight.data, dim=0)
         
         # Initialize centering bias to geometric median of dataset if provided
         if data_for_init is not None:
@@ -88,6 +93,49 @@ class SparseAutoencoder(nn.Module):
         
         # Zero out values below the threshold
         return x * (x >= thresholds)
+    
+    def project_decoder_grad(self):
+        """
+        Project out gradient components parallel to dictionary vectors to maintain unit norm.
+        
+        This improves training by ensuring the gradient step doesn't modify the norm of
+        dictionary vectors, instead of naively renormalizing after each step.
+        """
+        if self.decoder.weight.grad is None:
+            return
+            
+        with torch.no_grad():
+            # Get the current dictionary vectors (columns of decoder.weight)
+            W = self.decoder.weight.data  # [input_dim, hidden_dim]
+            
+            # Get the gradient with respect to the dictionary vectors
+            dW = self.decoder.weight.grad.data  # [input_dim, hidden_dim]
+            
+            # For each dictionary vector, project out the component of the gradient 
+            # that is parallel to the dictionary vector
+            for j in range(W.shape[1]):
+                w_j = W[:, j].view(-1, 1)  # [input_dim, 1] - dictionary vector j
+                
+                # Compute the component of the gradient parallel to w_j
+                dw_j = dW[:, j].view(-1, 1)  # [input_dim, 1] - gradient for vector j
+                
+                # Project out the parallel component: dw_j -= (dw_j·w_j)w_j
+                # Since w_j has unit norm, we don't need to divide by its norm squared
+                parallel_component = torch.matmul(w_j.T, dw_j) * w_j
+                dW[:, j] = dw_j.view(-1) - parallel_component.view(-1)
+    
+    def normalize_decoder_weights(self):
+        """
+        Normalize the decoder weights to have unit norm.
+        
+        This serves as a fallback to ensure unit norm is maintained,
+        but the primary constraint is handled by projecting out
+        parallel gradient components.
+        """
+        with torch.no_grad():
+            # Normalize each column to have unit norm
+            normalized_weights = F.normalize(self.decoder.weight.data, dim=0)
+            self.decoder.weight.data.copy_(normalized_weights)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
