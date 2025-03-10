@@ -12,6 +12,10 @@ Our SAE implementation:
 - Supports both L1 sparsity and top-k activation constraints
 - Provides tools for feature visualization and interpretation
 
+This work is hugely based on the work of **Anthropic**, especially this piece of research : https://transformer-circuits.pub/2023/monosemantic-features/index.html#appendix-autoencoder-untied.
+
+
+
 ### Training & Usage <a name="sae-training-usage"></a>
 
 To train SAEs on ESMC model activations:
