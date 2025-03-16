@@ -19,7 +19,6 @@ import os
 import random
 from typing import List, Dict, Optional, Tuple
 import wandb  # Import wandb for experiment tracking
-from esm.utils.constants.models import ESMC_600M, ESMC_300M
 from esm.pretrained import load_local_model
 from interpretability.esmc_interpreter import ESMCInterpreter
 
@@ -141,9 +140,6 @@ def setup_interpreter(args):
     model = model.to(args.device)
     model.eval()  # Set to evaluation mode
     
-    # Verify model is ESMC type
-    if not isinstance(model, ESMC):
-        raise ValueError(f"Model {args.model_name} is not an ESMC model")
     
     # Create interpreter with specified parameters
     interpreter = ESMCInterpreter(

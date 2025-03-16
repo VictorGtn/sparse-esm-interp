@@ -173,7 +173,7 @@ class SparseAutoencoder(nn.Module):
             sparse_code: Tensor of shape [batch_size, hidden_dim] with sparse activations
         """
         # For each neuron, check if it fired for any example in the batch
-        active_neurons = (sparse_code > 0).any(dim=0).cpu()  # Shape: [hidden_dim]
+        active_neurons = (sparse_code > 1e-8).any(dim=0).cpu()  # Shape: [hidden_dim]
         self.neuron_activity_history.append(active_neurons)
         self.steps_since_update += 1
         
