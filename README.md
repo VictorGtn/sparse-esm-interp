@@ -12,7 +12,10 @@ Our SAE implementation:
 - Supports both L1 sparsity and top-k activation constraints
 - Provides tools for feature visualization and interpretation
 
-This work is hugely based on the work of **Anthropic**, especially this piece of research : https://transformer-circuits.pub/2023/monosemantic-features/index.html#appendix-autoencoder-untied.
+This work is hugely based on the work of **Anthropic**, especially this piece of research : https://transformer-circuits.pub/2023/monosemantic-features/index.html#appendix-autoencoder-untied. And on those two papers : **InterPLM** : https://arxiv.org/abs/2412.12101 and **Interpreting and Steering Protein Language Models through Sparse Autoencoders** : https://arxiv.org/html/2502.09135v1#A1.SS1
+
+
+
 
 
 
