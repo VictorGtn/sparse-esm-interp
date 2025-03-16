@@ -37,21 +37,16 @@ class ESMCInterpreter:
         self.model = model
         self.device = device or next(model.parameters()).device
         
-        # Get model dimension from the embedding layer since d_model isn't directly accessible
-        # The embedding dimension is the output size of the embedding layer
         self.model_dim = model.embed.embedding_dim
         self.hidden_dim = hidden_dim or (2 * self.model_dim)
         self.l1_coefficient = l1_coefficient
         self.use_top_k = use_top_k
         self.top_k_percentage = top_k_percentage
         
-        # Create activation capturer
         self.capturer = ESMCActivationCapturer(model)
         
-        # Dictionary to store autoencoders for different layers
         self.autoencoders = {}
         
-        # Determine data type from model
         self.dtype = next(model.parameters()).dtype
         
     def create_autoencoder_for_layer(self, layer_idx: int, component: str = 'mlp', data_for_init: Optional[torch.Tensor] = None) -> SparseAutoencoder:
@@ -68,7 +63,6 @@ class ESMCInterpreter:
         """
         key = f"{component}_{layer_idx}"
         
-        # Get input dimension based on component
         if component == 'embeddings':
             input_dim = self.model_dim
         elif component == 'attention':
@@ -78,7 +72,6 @@ class ESMCInterpreter:
         else:
             raise ValueError(f"Unknown component: {component}")
         
-        # Create autoencoder
         autoencoder = SparseAutoencoder(
             input_dim=input_dim,
             hidden_dim=self.hidden_dim,
@@ -113,7 +106,6 @@ class ESMCInterpreter:
         Returns:
             Dictionary mapping layer keys to tensors of activations
         """
-        # Set up activation capturer
         self.capturer = ESMCActivationCapturer(
             self.model, 
             layers_to_capture=layer_indices,
@@ -123,59 +115,38 @@ class ESMCInterpreter:
         
         all_activations = defaultdict(list)
         
-        # Process inputs in batches
         for i in tqdm(range(0, len(input_sequences), batch_size), desc="Collecting activations"):
             batch = input_sequences[i:i+batch_size]
             
-            # Clear previous activations
             self.capturer.clear_activations()
             
-            # Tokenize sequences
             batch_tokens = [self.model.tokenizer.encode(seq) for seq in batch]
             max_len = max(len(tokens) for tokens in batch_tokens)
             
-            # Pad sequences to the same length
             padded_tokens = [
                 tokens + [self.model.tokenizer.pad_token_id] * (max_len - len(tokens))
                 for tokens in batch_tokens
             ]
             
-            # Create attention mask
-            attention_mask = torch.tensor([
-                [1] * len(tokens) + [0] * (max_len - len(tokens))
-                for tokens in batch_tokens
-            ], device=self.device)
-            
-            # Convert to tensor
             tokens_tensor = torch.tensor(padded_tokens, device=self.device)
             
-            # Forward pass with no grad
             with torch.no_grad():
                 self.model(tokens_tensor)
                 
-                # Collect activations
                 activations = self.capturer.get_activations()
                 for k, v in activations.items():
-                    # Extract activations, excluding padding tokens
                     for j, tokens in enumerate(batch_tokens):
                         seq_len = len(tokens)
                         
-                        # Determine start and end indices based on whether to include special tokens
                         start_idx = 0 if include_special_tokens else 1
                         end_idx = seq_len if include_special_tokens else seq_len - 1
-                        
-                        # Get activations for the specified token range
-                        # For ESMC, tokens include BOS and EOS special tokens
                         seq_acts = v[j, start_idx:end_idx]
                         all_activations[k].append(seq_acts)
         
-        # Remove hooks
         self.capturer.remove_hooks()
         
-        # Process and concatenate all collected activations
         processed_activations = {}
         for k, act_list in all_activations.items():
-            # Concatenate all activations along the first dimension
             concatenated = torch.cat([act.reshape(-1, act.size(-1)) for act in act_list], dim=0)
             processed_activations[k] = concatenated
             
@@ -218,21 +189,17 @@ class ESMCInterpreter:
         """
         key = f"{component}_{layer_idx}"
         
-        # Create autoencoder if it doesn't exist
         if key not in self.autoencoders:
-            # Take a sample of activations to initialize the centering bias
-            sample_size = min(1000, activations.shape[0])  # Limit sample size
+            sample_size = min(1000, activations.shape[0]) 
             activation_sample = activations[:sample_size]
             self.create_autoencoder_for_layer(layer_idx, component, data_for_init=activation_sample)
         
         autoencoder = self.autoencoders[key]
         optimizer = torch.optim.AdamW(autoencoder.parameters(), lr=lr)
         
-        # Create dataset and dataloader
         dataset = TensorDataset(activations)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
-        # Import wandb only if needed (to avoid dependency requirement when not using it)
         if use_wandb:
             try:
                 import wandb
@@ -240,21 +207,17 @@ class ESMCInterpreter:
                 print("wandb not installed. Run 'pip install wandb' to enable wandb logging.")
                 use_wandb = False
         
-        # Add prefix with trailing slash if provided
         if wandb_prefix and not wandb_prefix.endswith('/'):
             wandb_prefix = wandb_prefix + '/'
         
-        # Save a subset of activations for dead neuron resampling
         if resample_dead_neurons:
-            resampling_size = min(819200, len(activations))  # As specified in the description
+            resampling_size = min(819200, len(activations)) 
             resampling_indices = torch.randperm(len(activations))[:resampling_size]
             resampling_activations = activations[resampling_indices].to(self.device)
         
-        # Training loop
         metrics = defaultdict(list)
-        global_step = 0  # Track total training steps
+        global_step = 0  
         
-        # Initial normalization of decoder weights if using unit norm constraint
         if unit_norm_constraint:
             autoencoder.normalize_decoder_weights()
         
@@ -264,41 +227,26 @@ class ESMCInterpreter:
             
             for (x,) in tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}"):
                 x = x.to(self.device)
-                
-                # Forward pass
                 reconstructed, sparse_code = autoencoder(x)
                 
-                # Track neuron activity for dead neuron detection
                 autoencoder.track_neuron_activity(sparse_code)
                 
-                # Compute loss
                 loss_dict = autoencoder.loss(x, reconstructed, sparse_code)
                 loss = loss_dict["total"]
                 
-                # Backward pass
                 optimizer.zero_grad()
                 loss.backward()
                 
-                # Project out gradient components parallel to dictionary vectors
                 if unit_norm_constraint:
                     autoencoder.project_decoder_grad()
-                
-                # Update weights
                 optimizer.step()
                 
-                # Apply unit norm constraint as a fallback
-                #if unit_norm_constraint:
-                    #autoencoder.normalize_decoder_weights()
-                
-                # Track metrics
                 for k, v in loss_dict.items():
                     epoch_metrics[k] += v.item() if torch.is_tensor(v) else v
                 n_batches += 1
                 
-                # Increment global step
                 global_step += 1
                 
-                # Resample dead neurons at specified steps
                 if (resample_dead_neurons and 
                     global_step in resample_steps and 
                     autoencoder.steps_since_update >= 12500):
@@ -316,15 +264,12 @@ class ESMCInterpreter:
                                 f"{wandb_prefix}step": global_step
                             })
             
-            # Compute epoch averages
             for k, v in epoch_metrics.items():
                 avg_v = v / n_batches
                 metrics[k].append(avg_v)
             
-            # Log to wandb if enabled
             if use_wandb:
                 wandb_metrics = {f"{wandb_prefix}{k}": v for k, v in metrics.items()}
-                # Add epoch information to metrics
                 wandb_metrics[f"{wandb_prefix}epoch"] = epoch
                 wandb_metrics[f"{wandb_prefix}step"] = global_step
                 wandb.log(wandb_metrics)
@@ -332,7 +277,6 @@ class ESMCInterpreter:
             print(f"Epoch {epoch+1}: recon_loss={metrics['reconstruction'][-1]:.4f}, "
                   f"sparsity={metrics['sparsity'][-1]:.4f}")
         
-        # Save model if requested
         if save_path:
             path = Path(save_path)
             path.parent.mkdir(parents=True, exist_ok=True)

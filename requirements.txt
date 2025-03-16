@@ -8,6 +8,9 @@ biotite>=0.36.0  # Added for protein sequence handling
 # ESM model dependencies
 esm>=0.1.0  # EvolutionaryScale ESM package - https://github.com/evolutionaryscale/esm
 
+# Data analysis dependencies
+dadapy>=0.1  # For intrinsic dimension estimation - https://dadapy.readthedocs.io/
+
 # Visualization and experiment tracking
 wandb>=0.12.0  # Optional for experiment tracking
 seaborn>=0.11.0  # For enhanced visualizations
