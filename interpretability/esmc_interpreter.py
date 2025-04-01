@@ -295,7 +295,6 @@ class ESMCInterpreter:
             if use_wandb:
                 wandb_metrics = {f"{wandb_prefix}{k}": v for k, v in metrics.items()}
                 wandb_metrics[f"{wandb_prefix}epoch"] = epoch
-                wandb_metrics[f"{wandb_prefix}step"] = global_step
                 wandb.log(wandb_metrics)
 
             print(
@@ -309,6 +308,12 @@ class ESMCInterpreter:
                 loss = loss_dict["total"]
                 for k, v in loss_dict.items():
                     metrics[k].append(v.item())
+                if use_wandb:
+                    wandb.log(
+                        {
+                            f"{wandb_prefix}valid_loss": loss.item(),
+                        }
+                    )
 
         if save_path:
             path = Path(save_path)

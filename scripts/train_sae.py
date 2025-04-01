@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+import torch.backends.mps
 import wandb
 from esm.pretrained import load_local_model
 
@@ -31,7 +32,11 @@ logger = logging.getLogger(__name__)
 args = {
     # Model settings
     "model_name": "esmc_600m",
-    "device": "cuda" if torch.cuda.is_available() else "cpu",
+    "device": "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu",
     "seed": 42,
     # Data settings
     "training_data_path": "data/train_data.csv",  # Path to training data
@@ -47,7 +52,7 @@ args = {
     "top_k_percentage": 0.1,
     "unit_norm_constraint": True,
     # Training settings
-    "layers": "5,10,15",
+    "layer": 28,  # Single layer to analyze
     "component": "mlp",
     "epochs": 5,
     "batch_size": 8,
@@ -147,115 +152,136 @@ def main():
         args["valid_data_path"], args["subset_size"]
     )
 
-    layer_indices = [int(idx) for idx in args["layers"].split(",")]
+    layer_idx = args["layer"]
+    layer_key = f"layer_{layer_idx}_{args['component']}"
 
     logger.info(
-        f"Collecting activations for layers {layer_indices} ({args['component']})"
-    )
-    train_activations = interpreter.collect_activations(
-        input_sequences=train_sequences,
-        layer_indices=layer_indices,
-        component=args["component"],
-        batch_size=args["batch_size"],
-        include_special_tokens=args["include_special_tokens"],
+        f"Checking/collecting activations for layer {layer_idx} ({args['component']})"
     )
 
-    valid_activations = interpreter.collect_activations(
-        input_sequences=valid_sequences,
-        layer_indices=layer_indices,
-        component=args["component"],
-        batch_size=args["batch_size"],
-        include_special_tokens=args["include_special_tokens"],
-    )
+    # Check for existing activations
+    acts_dir = output_dir / f"activations_{layer_key}"
+    train_path = acts_dir / "train_activations.pt"
+    valid_path = acts_dir / "valid_activations.pt"
 
-    logger.info(
-        f"Total activations collected: {len(train_activations)} training, {len(valid_activations)} validation"
-    )
-    for layer_idx in layer_indices:
-        layer_key = f"layer_{layer_idx}_{args['component']}"
-        if layer_key not in train_activations:
-            logger.warning(f"No activations found for {layer_key}, skipping")
-            continue
+    if train_path.exists() and valid_path.exists():
+        logger.info(f"Found existing activations for {layer_key}, loading from disk")
+        train_activations = torch.load(train_path)
+        valid_activations = torch.load(valid_path)
 
-        logger.info(f"Training autoencoder for {layer_key}")
-        train_layer_acts = train_activations[layer_key]
-        valid_layer_acts = valid_activations[layer_key]
-        sparsity_type = "top_k" if args["use_top_k"] else "l1"
-        save_dir = output_dir / f"layer_{layer_idx}_{args['component']}_{sparsity_type}"
-        save_dir.mkdir(exist_ok=True)
-        save_path = save_dir / "autoencoder.pt"
-
-        logger.info(f"Training autoencoder for {layer_key}")
-
-        resample_steps = None
-        if args["resample_dead_neurons"]:
-            resample_steps = [int(step) for step in args["resample_steps"].split(",")]
-            logger.info(f"Will resample dead neurons at steps: {resample_steps}")
-
-        if args["unit_norm_constraint"]:
-            logger.info("Using improved unit norm constraint with gradient projection")
-
-        metrics = interpreter.train_layer_autoencoder(
-            layer_idx=layer_idx,
-            train_activations=train_layer_acts,
-            valid_activations=valid_layer_acts,
+        # Move to correct device if needed
+        if str(train_activations.device) != args["device"]:
+            train_activations = train_activations.to(args["device"])
+            valid_activations = valid_activations.to(args["device"])
+    else:
+        logger.info(
+            f"No existing activations found for {layer_key}, collecting new ones"
+        )
+        # Collect activations
+        train_activations = interpreter.collect_activations(
+            input_sequences=train_sequences,
+            layer_indices=[layer_idx],
             component=args["component"],
-            epochs=args["epochs"],
             batch_size=args["batch_size"],
-            lr=args["learning_rate"],
-            save_path=save_path,
-            use_wandb=args["use_wandb"],
-            wandb_prefix=f"layer_{layer_idx}/{args['component']}",
-            resample_dead_neurons=args["resample_dead_neurons"],
-            resample_steps=resample_steps,
-            unit_norm_constraint=args["unit_norm_constraint"],
+            include_special_tokens=args["include_special_tokens"],
+        )[layer_key]
+
+        valid_activations = interpreter.collect_activations(
+            input_sequences=valid_sequences,
+            layer_indices=[layer_idx],
+            component=args["component"],
+            batch_size=args["batch_size"],
+            include_special_tokens=args["include_special_tokens"],
+        )[layer_key]
+
+        # Save the activations
+        acts_dir.mkdir(exist_ok=True)
+        torch.save(train_activations, train_path)
+        torch.save(valid_activations, valid_path)
+
+        metadata = {
+            "train_shape": list(train_activations.shape),
+            "valid_shape": list(valid_activations.shape),
+            "layer": layer_idx,
+            "component": args["component"],
+            "device": str(train_activations.device),
+        }
+        with open(acts_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        logger.info(f"Saved activations for {layer_key}")
+
+    logger.info("Training autoencoder")
+    sparsity_type = "top_k" if args["use_top_k"] else "l1"
+    save_dir = output_dir / f"layer_{layer_idx}_{args['component']}_{sparsity_type}"
+    save_dir.mkdir(exist_ok=True)
+    save_path = save_dir / "autoencoder.pt"
+
+    resample_steps = None
+    if args["resample_dead_neurons"]:
+        resample_steps = [int(step) for step in args["resample_steps"].split(",")]
+        logger.info(f"Will resample dead neurons at steps: {resample_steps}")
+
+    if args["unit_norm_constraint"]:
+        logger.info("Using improved unit norm constraint with gradient projection")
+
+    metrics = interpreter.train_layer_autoencoder(
+        layer_idx=layer_idx,
+        train_activations=train_activations,
+        valid_activations=valid_activations,
+        component=args["component"],
+        epochs=args["epochs"],
+        batch_size=args["batch_size"],
+        lr=args["learning_rate"],
+        save_path=save_path,
+        use_wandb=args["use_wandb"],
+        wandb_prefix=f"layer_{layer_idx}/{args['component']}",
+        resample_dead_neurons=args["resample_dead_neurons"],
+        resample_steps=resample_steps,
+        unit_norm_constraint=args["unit_norm_constraint"],
+    )
+
+    metrics_path = save_dir / "training_metrics.json"
+    with open(metrics_path, "w") as f:
+        serializable_metrics = {}
+        for k, v in metrics.items():
+            serializable_metrics[k] = [
+                float(x) if not isinstance(x, float) else x for x in v
+            ]
+        json.dump(serializable_metrics, f, indent=2)
+
+    plt.figure(figsize=(12, 8))
+
+    plt.subplot(2, 2, 1)
+    plt.plot(metrics["total"])
+    plt.title("Total Loss")
+    plt.xlabel("Epoch")
+
+    plt.subplot(2, 2, 2)
+    plt.plot(metrics["reconstruction"])
+    plt.title("Reconstruction Loss")
+    plt.xlabel("Epoch")
+
+    if not args["use_top_k"]:
+        plt.subplot(2, 2, 3)
+        plt.plot(metrics["l1_sparsity"])
+        plt.title("L1 Sparsity Loss")
+        plt.xlabel("Epoch")
+
+    plt.subplot(2, 2, 4)
+    plt.plot(metrics["sparsity"])
+    plt.title("Sparsity (% zeros)")
+    plt.xlabel("Epoch")
+
+    plt.tight_layout()
+    plt.savefig(save_dir / "training_metrics.png")
+
+    if args["use_wandb"]:
+        wandb.log(
+            {f"layer_{layer_idx}/{args['component']}/training_plot": wandb.Image(plt)}
         )
 
-        metrics_path = save_dir / "training_metrics.json"
-        with open(metrics_path, "w") as f:
-            serializable_metrics = {}
-            for k, v in metrics.items():
-                serializable_metrics[k] = [
-                    float(x) if not isinstance(x, float) else x for x in v
-                ]
-            json.dump(serializable_metrics, f, indent=2)
-
-        plt.figure(figsize=(12, 8))
-
-        plt.subplot(2, 2, 1)
-        plt.plot(metrics["total"])
-        plt.title("Total Loss")
-        plt.xlabel("Epoch")
-
-        plt.subplot(2, 2, 2)
-        plt.plot(metrics["reconstruction"])
-        plt.title("Reconstruction Loss")
-        plt.xlabel("Epoch")
-
-        if not args["use_top_k"]:
-            plt.subplot(2, 2, 3)
-            plt.plot(metrics["l1_sparsity"])
-            plt.title("L1 Sparsity Loss")
-            plt.xlabel("Epoch")
-
-        plt.subplot(2, 2, 4)
-        plt.plot(metrics["sparsity"])
-        plt.title("Sparsity (% zeros)")
-        plt.xlabel("Epoch")
-
-        plt.tight_layout()
-        plt.savefig(save_dir / "training_metrics.png")
-
-        if args["use_wandb"]:
-            wandb.log(
-                {
-                    f"layer_{layer_idx}/{args['component']}/training_plot": wandb.Image(
-                        plt
-                    )
-                }
-            )
-
-        plt.close()
+    plt.close()
 
     logger.info(f"Training and analysis complete. Results saved to {output_dir}")
 
