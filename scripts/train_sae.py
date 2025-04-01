@@ -8,114 +8,187 @@ and interprets the learned features.
 """
 
 import argparse
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from pathlib import Path
-import logging
 import json
-from tqdm.auto import tqdm
-import os
+import logging
 import random
-from typing import List, Dict, Optional, Tuple
-import wandb  
+from pathlib import Path
+from typing import List, Optional
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+import wandb
 from esm.pretrained import load_local_model
+
 from interpretability.esmc_interpreter import ESMCInterpreter
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Train Sparse Autoencoders on ESM model activations")
-    
-    parser.add_argument("--model-name", type=str, default="esmc_600m",
-                        help="Name of pretrained ESM model to use")
-    parser.add_argument("--data-path", type=str, required=True,
-                        help="Path to file with protein sequences (one per line)")
-    parser.add_argument("--output-dir", type=str, default="./sae_results",
-                        help="Directory to save results")
-    parser.add_argument("--subset-size", type=int, default=None,
-                        help="Number of sequences to use from dataset (for faster experimentation)")
-    parser.add_argument("--include-special-tokens", action="store_true",
-                        help="Include special tokens (BOS/EOS) in collected activations")
-    
+    parser = argparse.ArgumentParser(
+        description="Train Sparse Autoencoders on ESM model activations"
+    )
+
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default="esmc_600m",
+        help="Name of pretrained ESM model to use",
+    )
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        required=True,
+        help="Path to file with protein sequences (one per line)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./sae_results",
+        help="Directory to save results",
+    )
+    parser.add_argument(
+        "--subset-size",
+        type=int,
+        default=None,
+        help="Number of sequences to use from dataset (for faster experimentation)",
+    )
+    parser.add_argument(
+        "--include-special-tokens",
+        action="store_true",
+        help="Include special tokens (BOS/EOS) in collected activations",
+    )
+
     # Autoencoder arguments
-    parser.add_argument("--sae-hidden-dim", type=int, default=None,
-                        help="Hidden dimension for SAE (default: 2x model dim)")
-    parser.add_argument("--sae-l1-coefficient", type=float, default=1e-3,
-                        help="L1 sparsity coefficient")
-    parser.add_argument("--use-top-k", action="store_true",
-                        help="Use top-k sparsity instead of L1")
-    parser.add_argument("--top-k-percentage", type=float, default=0.1, 
-                        help="Percentage of features to keep active in top-k sparsity")
-    parser.add_argument("--unit-norm-constraint", action="store_true", default=True,
-                        help="Apply unit norm constraint to dictionary vectors with gradient projection")
-    
+    parser.add_argument(
+        "--sae-hidden-dim",
+        type=int,
+        default=None,
+        help="Hidden dimension for SAE (default: 2x model dim)",
+    )
+    parser.add_argument(
+        "--sae-l1-coefficient", type=float, default=1e-3, help="L1 sparsity coefficient"
+    )
+    parser.add_argument(
+        "--use-top-k", action="store_true", help="Use top-k sparsity instead of L1"
+    )
+    parser.add_argument(
+        "--top-k-percentage",
+        type=float,
+        default=0.1,
+        help="Percentage of features to keep active in top-k sparsity",
+    )
+    parser.add_argument(
+        "--unit-norm-constraint",
+        action="store_true",
+        default=True,
+        help="Apply unit norm constraint to dictionary vectors with gradient projection",
+    )
+
     # Training arguments
-    parser.add_argument("--layers", type=str, default="5,10,15",
-                        help="Comma-separated list of layer indices to analyze")
-    parser.add_argument("--component", type=str, default="mlp",
-                        choices=["mlp", "attention", "embeddings"],
-                        help="Component to analyze")
-    parser.add_argument("--epochs", type=int, default=5,
-                        help="Number of training epochs")
-    parser.add_argument("--batch-size", type=int, default=256,
-                        help="Batch size for training")
-    parser.add_argument("--learning-rate", type=float, default=1e-3,
-                        help="Learning rate")
-    
+    parser.add_argument(
+        "--layers",
+        type=str,
+        default="5,10,15",
+        help="Comma-separated list of layer indices to analyze",
+    )
+    parser.add_argument(
+        "--component",
+        type=str,
+        default="mlp",
+        choices=["mlp", "attention", "embeddings"],
+        help="Component to analyze",
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=5, help="Number of training epochs"
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=8, help="Batch size for training"
+    )
+    parser.add_argument(
+        "--learning-rate", type=float, default=1e-3, help="Learning rate"
+    )
+
     # Dead neuron resampling arguments
-    parser.add_argument("--resample-dead-neurons", action="store_true",
-                        help="Enable dead neuron resampling during training")
-    parser.add_argument("--resample-steps", type=str, default="25000,50000,75000,100000",
-                        help="Comma-separated list of steps at which to check and resample dead neurons")
-    
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
-                        help="Device to use (cuda or cpu)")
-    
+    parser.add_argument(
+        "--resample-dead-neurons",
+        action="store_true",
+        help="Enable dead neuron resampling during training",
+    )
+    parser.add_argument(
+        "--resample-steps",
+        type=str,
+        default="25000,50000,75000,100000",
+        help="Comma-separated list of steps at which to check and resample dead neurons",
+    )
+
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to use (cuda or cpu)",
+    )
+
     # Weights & Biases arguments
-    parser.add_argument("--use-wandb", action="store_true",
-                        help="Track experiments with Weights & Biases")
-    parser.add_argument("--wandb-project", type=str, default="esmc-sparse-autoencoders",
-                        help="Weights & Biases project name")
-    parser.add_argument("--wandb-entity", type=str, default=None,
-                        help="Weights & Biases entity name (username or team name)")
-    parser.add_argument("--wandb-name", type=str, default=None,
-                        help="Name for this specific run (default: auto-generated)")
-    
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        help="Track experiments with Weights & Biases",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="esmc-sparse-autoencoders",
+        help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default=None,
+        help="Weights & Biases entity name (username or team name)",
+    )
+    parser.add_argument(
+        "--wandb-name",
+        type=str,
+        default=None,
+        help="Name for this specific run (default: auto-generated)",
+    )
+
     return parser.parse_args()
 
 
-def load_protein_sequences(data_path: str, max_sequences: Optional[int] = None) -> List[str]:
+def load_protein_sequences(
+    data_path: str, max_sequences: Optional[int] = None
+) -> List[str]:
     """
-    Load protein sequences from a file.
-    
+    Load protein sequences from a CSV file.
+
     Args:
-        data_path: Path to file with sequences (one per line)
+        data_path: Path to CSV file with sequences (must have 'text' column)
         max_sequences: Maximum number of sequences to load
-        
+
     Returns:
         List of protein sequences
     """
     logger.info(f"Loading protein sequences from {data_path}")
-    
-    sequences = []
-    with open(data_path, 'r') as f:
-        for i, line in enumerate(f):
-            if max_sequences is not None and i >= max_sequences:
-                break
-            
-            seq = line.strip()
-            if seq:
-                sequences.append(seq)
-    
+
+    # Read CSV file using pandas
+    df = pd.read_csv(data_path)
+
+    # Get sequences from 'text' column
+    sequences = df["text"].tolist()
+
+    # Limit sequences if max_sequences is specified
+    if max_sequences is not None:
+        sequences = sequences[:max_sequences]
+
     logger.info(f"Loaded {len(sequences)} sequences")
     return sequences
 
@@ -123,19 +196,19 @@ def load_protein_sequences(data_path: str, max_sequences: Optional[int] = None) 
 def setup_interpreter(args):
     """
     Set up the ESM model and interpreter.
-    
+
     Args:
         args: Command line arguments
-        
+
     Returns:
         tuple of (model, interpreter)
     """
     logger.info(f"Loading pretrained model: {args.model_name}")
-    
+
     model = load_local_model(args.model_name, args.device)
     model = model.to(args.device)
-    model.eval()  
-    
+    model.eval()
+
     interpreter = ESMCInterpreter(
         model=model,
         hidden_dim=args.sae_hidden_dim,
@@ -144,71 +217,71 @@ def setup_interpreter(args):
         use_top_k=args.use_top_k,
         top_k_percentage=args.top_k_percentage,
     )
-    
+
     return model, interpreter
 
 
 def main():
     args = parse_args()
-    
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
-    
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     with open(output_dir / "args.json", "w") as f:
         json.dump(vars(args), f, indent=2)
-    
+
     if args.use_wandb:
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             name=args.wandb_name,
-            config=vars(args)
+            config=vars(args),
         )
         logger.info(f"Tracking experiment with Weights & Biases: {wandb.run.name}")
-    
+
     model, interpreter = setup_interpreter(args)
     sequences = load_protein_sequences(args.data_path, args.subset_size)
-    
+
     layer_indices = [int(idx) for idx in args.layers.split(",")]
-    
+
     logger.info(f"Collecting activations for layers {layer_indices} ({args.component})")
     activations = interpreter.collect_activations(
         input_sequences=sequences,
         layer_indices=layer_indices,
         component=args.component,
         batch_size=args.batch_size,
-        include_special_tokens=args.include_special_tokens
+        include_special_tokens=args.include_special_tokens,
     )
-    
+
     logger.info(f"Total activations collected: {len(activations)}")
     for layer_idx in layer_indices:
         layer_key = f"layer_{layer_idx}_{args.component}"
         if layer_key not in activations:
             logger.warning(f"No activations found for {layer_key}, skipping")
             continue
-        
+
         logger.info(f"Training autoencoder for {layer_key}")
         layer_acts = activations[layer_key]
-        
+
         sparsity_type = "top_k" if args.use_top_k else "l1"
         save_dir = output_dir / f"layer_{layer_idx}_{args.component}_{sparsity_type}"
         save_dir.mkdir(exist_ok=True)
         save_path = save_dir / "autoencoder.pt"
-        
+
         logger.info(f"Training autoencoder for {layer_key}")
-        
+
         resample_steps = None
         if args.resample_dead_neurons:
-            resample_steps = [int(step) for step in args.resample_steps.split(',')]
+            resample_steps = [int(step) for step in args.resample_steps.split(",")]
             logger.info(f"Will resample dead neurons at steps: {resample_steps}")
-        
+
         if args.unit_norm_constraint:
             logger.info("Using improved unit norm constraint with gradient projection")
-        
+
         metrics = interpreter.train_layer_autoencoder(
             layer_idx=layer_idx,
             activations=layer_acts,
@@ -228,45 +301,49 @@ def main():
         with open(metrics_path, "w") as f:
             serializable_metrics = {}
             for k, v in metrics.items():
-                serializable_metrics[k] = [float(x) if not isinstance(x, float) else x for x in v]
+                serializable_metrics[k] = [
+                    float(x) if not isinstance(x, float) else x for x in v
+                ]
             json.dump(serializable_metrics, f, indent=2)
-        
+
         plt.figure(figsize=(12, 8))
-        
+
         plt.subplot(2, 2, 1)
         plt.plot(metrics["total"])
         plt.title("Total Loss")
         plt.xlabel("Epoch")
-        
+
         plt.subplot(2, 2, 2)
         plt.plot(metrics["reconstruction"])
         plt.title("Reconstruction Loss")
         plt.xlabel("Epoch")
-        
+
         if not args.use_top_k:
             plt.subplot(2, 2, 3)
             plt.plot(metrics["l1_sparsity"])
             plt.title("L1 Sparsity Loss")
             plt.xlabel("Epoch")
-        
+
         plt.subplot(2, 2, 4)
         plt.plot(metrics["sparsity"])
         plt.title("Sparsity (% zeros)")
         plt.xlabel("Epoch")
-        
+
         plt.tight_layout()
         plt.savefig(save_dir / "training_metrics.png")
-        
+
         if args.use_wandb:
-            wandb.log({f"layer_{layer_idx}/{args.component}/training_plot": wandb.Image(plt)})
-        
+            wandb.log(
+                {f"layer_{layer_idx}/{args.component}/training_plot": wandb.Image(plt)}
+            )
+
         plt.close()
-    
+
     logger.info(f"Training and analysis complete. Results saved to {output_dir}")
-    
+
     if args.use_wandb:
         wandb.finish()
 
 
 if __name__ == "__main__":
-    main() 
+    main()
