@@ -161,7 +161,8 @@ class ESMCInterpreter:
     def train_layer_autoencoder(
         self,
         layer_idx: int,
-        activations: torch.Tensor,
+        train_activations: torch.Tensor,
+        valid_activations: torch.Tensor,
         component: str = "mlp",
         epochs: int = 10,
         batch_size: int = 256,
@@ -196,8 +197,8 @@ class ESMCInterpreter:
         key = f"{component}_{layer_idx}"
 
         if key not in self.autoencoders:
-            sample_size = min(1000, activations.shape[0])
-            activation_sample = activations[:sample_size]
+            sample_size = min(1000, train_activations.shape[0])
+            activation_sample = train_activations[:sample_size]
             self.create_autoencoder_for_layer(
                 layer_idx, component, data_for_init=activation_sample
             )
@@ -205,8 +206,15 @@ class ESMCInterpreter:
         autoencoder = self.autoencoders[key]
         optimizer = torch.optim.AdamW(autoencoder.parameters(), lr=lr)
 
-        dataset = TensorDataset(activations)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        train_dataset = TensorDataset(train_activations)
+        train_dataloader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True
+        )
+
+        valid_dataset = TensorDataset(valid_activations)
+        valid_dataloader = DataLoader(
+            valid_dataset, batch_size=batch_size, shuffle=False
+        )
 
         if use_wandb:
             try:
@@ -221,9 +229,13 @@ class ESMCInterpreter:
             wandb_prefix = wandb_prefix + "/"
 
         if resample_dead_neurons:
-            resampling_size = min(819200, len(activations))
-            resampling_indices = torch.randperm(len(activations))[:resampling_size]
-            resampling_activations = activations[resampling_indices].to(self.device)
+            resampling_size = min(819200, len(train_activations))
+            resampling_indices = torch.randperm(len(train_activations))[
+                :resampling_size
+            ]
+            resampling_activations = train_activations[resampling_indices].to(
+                self.device
+            )
 
         metrics = defaultdict(list)
         global_step = 0
@@ -235,7 +247,7 @@ class ESMCInterpreter:
             epoch_metrics = defaultdict(float)
             n_batches = 0
 
-            for (x,) in tqdm(dataloader, desc=f"Epoch {epoch + 1}/{epochs}"):
+            for (x,) in tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{epochs}"):
                 x = x.to(self.device)
                 reconstructed, sparse_code = autoencoder(x)
 
@@ -290,6 +302,13 @@ class ESMCInterpreter:
                 f"Epoch {epoch + 1}: recon_loss={metrics['reconstruction'][-1]:.4f}, "
                 f"sparsity={metrics['sparsity'][-1]:.4f}"
             )
+            for (x,) in valid_dataloader:
+                x = x.to(self.device)
+                reconstructed, sparse_code = autoencoder(x)
+                loss_dict = autoencoder.loss(x, reconstructed, sparse_code)
+                loss = loss_dict["total"]
+                for k, v in loss_dict.items():
+                    metrics[k].append(v.item())
 
         if save_path:
             path = Path(save_path)
